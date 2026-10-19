@@ -1,0 +1,63 @@
+{
+  "name": "prediction-market-research-lab",
+  "version": "1.0.0",
+  "description": "Prediction-market research across Polymarket and Kalshi (C++ core + TypeScript analysis + experimental strategies)",
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "start": "bun run src/index.ts",
+    "trading": "bun run src/strategies/trading.ts",
+    "copy-trade": "bun run src/strategies/copy-trade.ts",
+    "market-maker": "bun run src/strategies/market-maker.ts",
+    "analyze": "bun run src/cli/research/analyze-markets.ts",
+    "collect": "bun run src/cli/research/collect-market-data.ts",
+    "plots": "bun run src/cli/research/analyze-markets.ts",
+    "stats": "bun run src/stats/stats.ts",
+    "cpp:update-client": "./scripts/update-cpp-client.sh",
+    "cpp:configure": "cmake -S cpp -B cpp/build -DCMAKE_BUILD_TYPE=Release",
+    "cpp:build": "cmake --build cpp/build -j 4",
+    "cpp:test": "ctest --test-dir cpp/build --output-on-failure",
+    "discovery:cpp": "./cpp/build/discovery_mode --max 50 --iterations 1",
+    "strategy:nothing-ever-happens": "bun run research/nothing-ever-happens/main.ts",
+    "strategy:nothing-ever-happens:resolved": "bun run research/nothing-ever-happens/resolved-history.ts",
+    "build": "bun build src/index.ts --outdir ./dist --target node",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "test:watch": "bun test --watch",
+    "check:repo": "bash scripts/check-repo.sh"
+  },
+  "dependencies": {
+    "@ethersproject/wallet": "^5.8.0",
+    "@polymarket/builder-relayer-client": "^0.0.8",
+    "@polymarket/clob-client": "^5.8.1",
+    "@polymarket/order-utils": "3.0.1",
+    "@polymarket/real-time-data-client": "^1.4.0",
+    "dotenv": "^17.4.2",
+    "ethers": "5.8.0",
+    "viem": "^2.57.4",
+    "ws": "8.21.0"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.18.2",
+    "bun-types": "1.3.5",
+    "typescript": "^5.9.3"
+  },
+  "keywords": [
+    "polymarket",
+    "trading",
+    "research",
+    "analysis",
+    "backtesting",
+    "websocket",
+    "cpp",
+    "crypto"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/chrislernunes/prediction_markets_research"
+  },
+  "engines": {
+    "bun": ">=1.3.5"
+  }
+}
