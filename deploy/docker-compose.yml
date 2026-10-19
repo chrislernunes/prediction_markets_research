@@ -1,0 +1,35 @@
+# Run from the repository root:
+#   docker compose --env-file .env -f deploy/docker-compose.yml up --build
+# Secrets: put PRIVATE_KEY / FUNDER_ADDRESS in an untracked .env file (see .env.example).
+# The default is a dry run. Going live needs DRY_RUN=false AND CONFIRM_LIVE_TRADING=yes.
+services:
+  # C++ arb_test (low-latency)
+  arb-cpp:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.cpp
+    container_name: poly-arb-cpp
+    restart: unless-stopped
+    env_file:
+      - path: ../.env
+        required: false
+    environment:
+      - SIGNATURE_TYPE=${SIGNATURE_TYPE:-2}
+      - SIZE_USDC=${SIZE_USDC:-5}
+      - TRIGGER_COMBINED=${TRIGGER_COMBINED:-0.995}
+      - MAX_COMBINED=${MAX_COMBINED:-0.999}
+      - DRY_RUN=${DRY_RUN:-true}
+      - CONFIRM_LIVE_TRADING=${CONFIRM_LIVE_TRADING:-}
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 128M
+        reservations:
+          cpus: "0.25"
+          memory: 64M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

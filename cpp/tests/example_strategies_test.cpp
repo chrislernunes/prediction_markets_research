@@ -1,0 +1,225 @@
+#include <discovery_options.hpp>
+#include <example_strategies.hpp>
+#include <slippage.hpp>
+
+#include <chrono>
+#include <cmath>
+#include <cstdlib>
+#include <iostream>
+#include <string>
+#include <vector>
+
+namespace
+{
+void require(bool condition, const std::string &message)
+{
+    if (!condition)
+    {
+        std::cerr << "FAIL: " << message << '\n';
+        std::exit(1);
+    }
+}
+
+polyarb::MarketSnapshot make_snapshot()
+{
+    polyarb::MarketSnapshot snapshot;
+    snapshot.slug = "btc-updown-15m-test";
+    snapshot.condition_id = "0xcondition";
+    snapshot.token_yes = "yes";
+    snapshot.token_no = "no";
+    snapshot.yes_bid = 0.44;
+    snapshot.yes_ask = 0.46;
+    snapshot.no_bid = 0.48;
+    snapshot.no_ask = 0.49;
+    snapshot.yes_ask_size = 50.0;
+    snapshot.no_ask_size = 40.0;
+    return snapshot;
+}
+} // namespace
+
+int main()
+{
+    polyarb::StrategyConfig config;
+    config.arb_threshold = 0.98;
+    config.min_depth_usd = 10.0;
+    config.min_market_making_spread_bps = 300.0;
+
+    auto signals = polyarb::evaluate_example_strategies(make_snapshot(), config);
+    require(!signals.empty(), "expected at least one signal");
+
+    const auto *arb = polyarb::find_signal(signals, polyarb::SignalType::BinaryArbitrage);
+    require(arb != nullptr, "expected binary arbitrage signal");
+    require(std::abs(arb->edge_cents - 5.0) < 0.0001, "expected 5 cent edge");
+    require(arb->paper_trade.has_value(), "expected paper-trade projection");
+    require(std::abs(arb->paper_trade->expected_edge_usdc - 0.5263157895) < 0.0001,
+            "expected gross profit from equal YES/NO shares on $10 stake");
+    require(std::abs(arb->paper_trade->expected_payout_usdc - 10.5263157895) < 0.0001,
+            "expected one dollar gross payout per complementary bundle");
+    require(std::abs(arb->paper_trade->yes_shares - arb->paper_trade->no_shares) < 0.0001,
+            "expected equal complementary share quantities");
+
+    auto shallow = make_snapshot();
+    shallow.no_ask_size = 1.0;
+    signals = polyarb::evaluate_example_strategies(shallow, config);
+    require(polyarb::find_signal(signals, polyarb::SignalType::BinaryArbitrage) == nullptr,
+            "expected shallow market to skip arbitrage");
+
+    auto maker = make_snapshot();
+    maker.yes_bid = 0.40;
+    maker.yes_ask = 0.50;
+    signals = polyarb::evaluate_example_strategies(maker, config);
+    require(polyarb::find_signal(signals, polyarb::SignalType::MarketMakingCandidate) != nullptr,
+            "expected market-making candidate");
+
+    std::vector<polymarket::PriceLevel> asks = {
+        {0.52, 10.0},
+        {0.50, 5.0},
+        {0.51, 5.0},
+    };
+    const auto fill = polyarb::simulate_buy_shares(asks, 8.0);
+    require(fill.fillable, "expected share sweep to fill");
+    require(std::abs(fill.spent_usdc - 4.03) < 0.0001, "expected weighted sweep cost");
+    require(std::abs(fill.avg_price - 0.50375) < 0.0001, "expected weighted average price");
+    require(std::abs(fill.slippage_bps - 75.0) < 0.0001, "expected bps slippage vs best ask");
+
+    const auto shallow_fill = polyarb::simulate_buy_shares(asks, 25.0);
+    require(!shallow_fill.fillable, "expected shallow book to be unfillable");
+    require(std::abs(shallow_fill.unfilled_shares - 5.0) < 0.0001, "expected unfilled shares");
+
+    const std::vector<polymarket::PriceLevel> yes_asks = {{0.46, 10.0}, {0.47, 10.0}};
+    const std::vector<polymarket::PriceLevel> no_asks = {{0.49, 10.0}, {0.50, 10.0}};
+    const auto bundle = polyarb::simulate_binary_bundle_buy(yes_asks, no_asks, 8.0);
+    require(bundle.fillable, "expected bundle sweep to fill");
+    require(std::abs(bundle.combined_avg_price - 0.95) < 0.0001, "expected combined average price");
+    require(std::abs(bundle.edge_cents - 5.0) < 0.0001, "expected bundle edge");
+
+    const std::vector<polymarket::PriceLevel> thin_yes = {{0.01, 1.0}};
+    const std::vector<polymarket::PriceLevel> thin_no = {{0.01, 1.0}};
+    const auto unfillable_bundle = polyarb::simulate_binary_bundle_buy(thin_yes, thin_no, 10.0);
+    require(!unfillable_bundle.fillable, "expected thin bundle to be unfillable");
+    require(unfillable_bundle.edge_cents <= 0.0, "expected unfillable bundle to avoid positive edge");
+
+    const auto zero_bundle = polyarb::simulate_binary_bundle_buy(thin_yes, thin_no, 0.0);
+    require(!zero_bundle.fillable, "expected zero-size bundle to be ignored");
+    require(zero_bundle.edge_cents == 0.0, "expected zero-size bundle to avoid fake edge");
+
+    const auto forever = polyarb::parse_discovery_options({"discovery_mode", "--15m", "--max", "18"});
+    require(forever.crypto_15m, "expected 15m option");
+    require(forever.max_markets == 18, "expected max market option");
+    require(!forever.max_iterations.has_value(), "expected default run-until-stopped mode");
+    require(!forever.max_runtime_ms.has_value(), "expected no default timeout");
+
+    const auto timed = polyarb::parse_discovery_options({"discovery_mode", "--duration-min", "30", "--interval-ms", "5000"});
+    require(timed.max_runtime_ms == 30 * 60 * 1000, "expected minute duration conversion");
+    require(timed.interval_ms == 5000, "expected interval option");
+
+    const auto bounded = polyarb::parse_discovery_options({"discovery_mode", "--iterations", "3"});
+    const auto started = std::chrono::steady_clock::now();
+    require(polyarb::should_continue_discovery(2, started, bounded), "expected bounded run to continue before max iterations");
+    require(!polyarb::should_continue_discovery(3, started, bounded), "expected bounded run to stop at max iterations");
+
+    polymarket::ClobMarket closed_market;
+    closed_market.condition_id = "closed";
+    closed_market.active = false;
+    closed_market.closed = true;
+    closed_market.tokens = {{"yes", "Yes"}, {"no", "No"}};
+    require(!polyarb::is_discovery_candidate(closed_market), "expected closed market to be filtered");
+
+    polymarket::ClobMarket active_market;
+    active_market.condition_id = "active";
+    active_market.active = true;
+    active_market.closed = false;
+    active_market.tokens = {{"yes", "Yes"}, {"no", "No"}};
+    require(polyarb::is_discovery_candidate(active_market), "expected active binary market candidate");
+
+    // ---- Depth gate is measured in bundles, not per-leg dollar notional.
+    {
+        polyarb::StrategyConfig cfg;
+        cfg.arb_threshold = 0.98;
+        cfg.min_depth_usd = 5.0;
+        cfg.paper_stake_usdc = 10.0;
+        cfg.min_market_making_spread_bps = 1e9;
+
+        auto skew = make_snapshot();
+        skew.yes_bid = 0.04;
+        skew.yes_ask = 0.05;
+        skew.no_bid = 0.90;
+        skew.no_ask = 0.92;
+        skew.yes_ask_size = 100.0;
+        skew.no_ask_size = 6.0;
+
+        // Per-leg notionals were $5.00 and $5.52, so the old gate passed and then projected
+        // 10.3 bundles although only 6 exist at the best asks.
+        auto skew_signals = polyarb::evaluate_example_strategies(skew, cfg);
+        const auto *skew_arb = polyarb::find_signal(skew_signals, polyarb::SignalType::BinaryArbitrage);
+        require(skew_arb != nullptr, "expected skewed book with 6 bundles to clear the $5 depth gate");
+        require(skew_arb->paper_trade->depth_limited, "expected paper trade to be marked depth limited");
+        require(std::abs(skew_arb->paper_trade->yes_shares - 6.0) < 1e-9, "expected paper shares capped at visible bundles");
+        require(std::abs(skew_arb->paper_trade->stake_usdc - 5.82) < 1e-9, "expected stake to equal cost of visible bundles");
+        require(std::abs(skew_arb->paper_trade->requested_stake_usdc - 10.0) < 1e-9, "expected requested stake preserved");
+        require(std::abs(skew_arb->paper_trade->expected_edge_usdc - 0.18) < 1e-9, "expected edge on capped bundles");
+        require(std::abs(skew_arb->executable_depth_usdc - 5.82) < 1e-9, "expected depth reported as bundle cost");
+
+        skew.no_ask_size = 4.0;
+        skew_signals = polyarb::evaluate_example_strategies(skew, cfg);
+        require(polyarb::find_signal(skew_signals, polyarb::SignalType::BinaryArbitrage) == nullptr,
+                "expected 4 bundles ($3.88) to fail the $5 depth gate");
+    }
+
+    // ---- Sweep refinement reports one edge, consistent with the book it swept.
+    {
+        auto sweep_signal = [&]()
+        {
+            auto base = polyarb::evaluate_example_strategies(make_snapshot(), config);
+            const auto *found = polyarb::find_signal(base, polyarb::SignalType::BinaryArbitrage);
+            require(found != nullptr, "expected arbitrage signal to refine");
+            return *found;
+        };
+
+        // Fills across two levels: edge shrinks from 5.00c to about 2.37c.
+        auto signal = sweep_signal();
+        const std::vector<polymarket::PriceLevel> yes_ladder = {{0.46, 5.0}, {0.50, 20.0}};
+        const std::vector<polymarket::PriceLevel> no_ladder = {{0.49, 5.0}, {0.50, 20.0}};
+        require(polyarb::refine_binary_arb_with_depth(signal, yes_ladder, no_ladder, config), "expected sweep to accept");
+        require(signal.edge_cents < 5.0 && signal.edge_cents > 2.0, "expected slippage-adjusted edge");
+        require(std::abs(signal.edge_cents - (1.0 - signal.combined_ask) * 100.0) < 1e-9, "expected one consistent edge");
+        require(std::abs(signal.paper_trade->expected_edge_usdc -
+                         (signal.paper_trade->yes_shares - signal.paper_trade->stake_usdc)) < 1e-9,
+                "expected paper edge to equal payout minus spend");
+        require(!signal.paper_trade->depth_limited, "expected full requested stake to fill");
+
+        // Average price no longer clears the arbitrage threshold: rejected.
+        auto expensive = sweep_signal();
+        const std::vector<polymarket::PriceLevel> yes_expensive = {{0.46, 5.0}, {0.60, 20.0}};
+        require(!polyarb::refine_binary_arb_with_depth(expensive, yes_expensive, no_ladder, config),
+                "expected slippage to erase the edge");
+
+        // Too shallow for min depth: rejected. With a lower floor it shrinks instead.
+        auto shallow_signal = sweep_signal();
+        const std::vector<polymarket::PriceLevel> yes_shallow = {{0.46, 4.0}};
+        const std::vector<polymarket::PriceLevel> no_deep = {{0.49, 50.0}};
+        require(!polyarb::refine_binary_arb_with_depth(shallow_signal, yes_shallow, no_deep, config),
+                "expected $3.80 of fillable bundles to fail the $10 floor");
+
+        auto low_floor = config;
+        low_floor.min_depth_usd = 3.0;
+        auto shrunk = sweep_signal();
+        require(polyarb::refine_binary_arb_with_depth(shrunk, yes_shallow, no_deep, low_floor), "expected shrink to fillable size");
+        require(shrunk.paper_trade->depth_limited, "expected shrunk trade to be depth limited");
+        require(std::abs(shrunk.paper_trade->yes_shares - 4.0) < 1e-9, "expected shares limited to YES depth");
+
+        // Market-making candidates pass through untouched.
+        auto maker_candidate = make_snapshot();
+        maker_candidate.yes_bid = 0.40;
+        maker_candidate.yes_ask = 0.50;
+        auto maker_signals = polyarb::evaluate_example_strategies(maker_candidate, config);
+        auto *maker_signal = const_cast<polyarb::StrategySignal *>(
+            polyarb::find_signal(maker_signals, polyarb::SignalType::MarketMakingCandidate));
+        require(maker_signal != nullptr, "expected market-making candidate");
+        const double before_edge = maker_signal->edge_cents;
+        require(polyarb::refine_binary_arb_with_depth(*maker_signal, {}, {}, config), "expected pass-through for non-arb signal");
+        require(maker_signal->edge_cents == before_edge, "expected non-arb signal unchanged");
+    }
+
+    return 0;
+}
