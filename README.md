@@ -1,7 +1,7 @@
 # prediction_markets_research
 
-A C++20 and TypeScript workspace for prediction-market research: collect market
-snapshots across Polymarket and Kalshi, investigate pricing signals, and test
+A workspace for prediction-market research: collect market snapshots 
+across Polymarket and Kalshi, investigate pricing signals, and test
 strategy hypotheses.
 
 ## Status and scope
